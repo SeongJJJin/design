@@ -1,0 +1,8 @@
+.x배너*.exe
+*.pkg
+*.pyz
+deploy
+dist
+build
+.env
+__pycache__
