@@ -249,55 +249,145 @@ class JsonToImage:
         return layer_positions
 
     def calculate_required_height(self, layer_positions):
-        """필요한 이미지 높이 계산 (동적 레이어 박스 지원)"""
+        """필요한 이미지 높이 계산 (동적 레이어 박스 지원, 데이터 양에 따른 하단 여백 최적화)"""
         if not layer_positions:
             return 1500
 
         max_y = 422  # 기본 상단 높이
+        print(f"🔍 높이 계산 시작 - 기본 상단 높이: {max_y}px")
+        print(f"🔍 레이어 개수: {len(layer_positions)}개")
         
         for layer_key, pos_info in layer_positions.items():
             # 동적 레이어 박스 정보가 있으면 우선 사용
             if 'layer_box_end' in pos_info:
                 layer_bottom = pos_info['layer_box_end']
+                print(f"🔍 {layer_key}: layer_box_end = {layer_bottom}px")
             else:
                 # 하위 호환성: 기존 방식
                 layer_bottom = pos_info['base_y'] + pos_info['height']
+                print(f"🔍 {layer_key}: base_y({pos_info['base_y']}) + height({pos_info['height']}) = {layer_bottom}px")
                 
             max_y = max(max_y, layer_bottom)
+            print(f"🔍 현재 max_y: {max_y}px")
 
-        # 하단 여유 공간 설정
-        bottom_margin = 30
-        bottom_area = 114
+        # 여백만 최소화, 푸터는 원본 크기 유지
+        bottom_margin = 10   # 여백만 최소화 (20 → 10)
+        bottom_area = 114    # 푸터는 원본 크기 유지 (30 → 114 복원)
+        
         required_height = max_y + bottom_margin + bottom_area
+        
+        print(f"🔍 최종 계산: max_y({max_y}) + bottom_margin({bottom_margin}) + bottom_area({bottom_area}) = {required_height}px")
+        print(f"🔍 하단 여백 총합: {bottom_margin + bottom_area}px")
         
         return required_height
 
-    def extend_image(self, original_image, required_height):
-        """이미지 높이 확장 (동적 레이어 지원)"""
+    def resize_image(self, original_image, required_height, data_count=0):
+        """이미지 높이 동적 조정 (확장/축소 모두 지원, 템플릿 중간 여백 제거)"""
         if not PIL_AVAILABLE:
             return original_image
             
         original_width, original_height = original_image.size
+        print(f"🖼️ 이미지 크기 조정 시작 - 원본: {original_width}x{original_height}px")
+        print(f"🖼️ 요청된 높이: {required_height}px")
+        print(f"🖼️ 데이터 개수: {data_count}개")
 
-        if required_height <= original_height:
-            return original_image
+        # 푸터 크기 설정 (원본 크기 유지)
+        footer_height = 114
         
+        if required_height == original_height:
+            print(f"🖼️ 크기 조정 불필요 - 원본 크기 그대로 사용")
+            return original_image
+        elif required_height < original_height:
+            print(f"🖼️ 축소 필요 - 템플릿 중간 여백 제거")
+            return self._crop_image(original_image, required_height, footer_height)
+        else:
+            print(f"🖼️ 확장 필요 - 이미지 높이 늘리기")
+            return self._extend_image(original_image, required_height, footer_height)
+    
+    def _crop_image(self, original_image, required_height, footer_height):
+        """이미지 축소 - 템플릿 중간 여백 제거"""
         try:
+            original_width, original_height = original_image.size
+            
+            # 새 이미지 생성
+            cropped_image = Image.new('RGBA', (original_width, required_height), (255, 255, 255, 255))
+            
+            # 1. 헤더 영역 복사 (고정: 0~422px)
+            header_area = original_image.crop((0, 0, original_width, 422))
+            cropped_image.paste(header_area, (0, 0))
+            print(f"🖼️ 헤더 영역 복사: 0~422px")
+            
+            # 2. 콘텐츠 영역 계산 (헤더 다음부터 푸터 직전까지)
+            content_start = 422
+            content_end = required_height - footer_height
+            content_height = content_end - content_start
+            
+            print(f"🖼️ 콘텐츠 영역: {content_start}~{content_end}px (높이: {content_height}px)")
+            
+            # 3. 원본에서 콘텐츠 영역 추출 (헤더 바로 다음부터)
+            if content_height > 0:
+                original_content = original_image.crop((0, 422, original_width, 422 + content_height))
+                cropped_image.paste(original_content, (0, content_start))
+                print(f"🖼️ 콘텐츠 영역 복사 완료")
+            
+            # 4. 푸터 영역 복사 (원본 맨 아래에서 가져와서 새 위치에 배치)
+            footer_start = required_height - footer_height
+            original_footer_start = original_height - 114  # 원본 푸터는 항상 114px
+            original_footer = original_image.crop((0, original_footer_start, original_width, original_height))
+            
+            # 푸터 크기 조정
+            if footer_height != 114:
+                resized_footer = original_footer.resize((original_width, footer_height))
+                cropped_image.paste(resized_footer, (0, footer_start))
+                print(f"🖼️ 푸터 리사이즈 후 복사: {footer_start}~{required_height}px (114px → {footer_height}px)")
+            else:
+                cropped_image.paste(original_footer, (0, footer_start))
+                print(f"🖼️ 푸터 원본 크기로 복사: {footer_start}~{required_height}px")
+            
+            print(f"🖼️ 이미지 축소 완료: {original_width}x{required_height}px")
+            return cropped_image
+            
+        except Exception as e:
+            print(f"🖼️ 이미지 축소 실패: {e}")
+            return original_image
+    
+    def _extend_image(self, original_image, required_height, footer_height):
+        """이미지 확장 - 기존 로직"""
+        try:
+            original_width, original_height = original_image.size
+            
             extended_image = Image.new('RGBA', (original_width, required_height), (255, 255, 255, 255))
 
             # 상단 영역 복사 (고정 헤더 영역)
             top_area = original_image.crop((0, 0, original_width, 422))
             extended_image.paste(top_area, (0, 0))
+            print(f"🖼️ 헤더 영역 복사 완료: 0~422px")
 
-            # 하단 영역 복사 (고정 푸터 영역)
-            bottom_source_start = original_height - 114
-            bottom_target_start = required_height - 114
-            bottom_area = original_image.crop((0, bottom_source_start, original_width, original_height))
-            extended_image.paste(bottom_area, (0, bottom_target_start))
+            # 하단 영역 복사 (동적 푸터 영역)
+            bottom_source_start = original_height - 114  # 원본에서는 항상 114로 추출
+            bottom_target_start = required_height - footer_height  # 목적지는 동적 크기로 배치
+            
+            print(f"🖼️ 푸터 설정 - 높이: {footer_height}px")
+            print(f"🖼️ 푸터 위치 - 원본: {bottom_source_start}~{original_height}px, 목표: {bottom_target_start}~{required_height}px")
+            
+            # 원본 푸터를 추출하여 동적 크기로 조정
+            original_bottom = original_image.crop((0, bottom_source_start, original_width, original_height))
+            
+            if footer_height != 114:
+                # 푸터 크기가 다르면 리사이즈 적용
+                resized_bottom = original_bottom.resize((original_width, footer_height))
+                extended_image.paste(resized_bottom, (0, bottom_target_start))
+                print(f"🖼️ 푸터 리사이즈 적용: 114px → {footer_height}px")
+            else:
+                # 기존 크기 그대로 사용
+                extended_image.paste(original_bottom, (0, bottom_target_start))
+                print(f"🖼️ 푸터 원본 크기 사용: {footer_height}px")
 
+            print(f"🖼️ 이미지 확장 완료: {original_width}x{required_height}px")
             return extended_image
             
         except Exception as e:
+            print(f"🖼️ 이미지 확장 실패: {e}")
             return original_image
 
     def split_and_save_image(self, output_image, chunk_height):
@@ -348,9 +438,10 @@ class JsonToImage:
             # 이미지 높이를 전달하여 레이어 위치 계산
             layer_positions = self.calculate_layer_positions(template, original_height)
 
-            # 계산된 레이어 위치 기반으로 필요 높이 계산 및 이미지 확장
+            # 계산된 레이어 위치 기반으로 필요 높이 계산 및 이미지 크기 조정
             required_height = self.calculate_required_height(layer_positions)
-            image = self.extend_image(original_image, required_height)
+            data_count = len(layer_positions)  # 데이터 개수 계산
+            image = self.resize_image(original_image, required_height, data_count)
             final_width, final_height = image.size
             
             draw = ImageDraw.Draw(image)
